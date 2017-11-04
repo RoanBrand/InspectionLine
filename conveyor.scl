@@ -1,0 +1,225 @@
+﻿FUNCTION_BLOCK "conveyor"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+   VAR_INPUT 
+      usrBtn { ExternalVisible := 'False'} : Bool;   // User Button. Press (True) to initiate product send.
+      prdSens { ExternalVisible := 'False'} : Bool;   // Product Sensor. True-> Product present.
+      eStop { ExternalVisible := 'False'} : Bool;   // Emergency stop button.
+      vsdReady { ExternalVisible := 'False'} : Bool;   // VSD Online and Ready. False-> Conveyor VSD off or in Error State.
+      xManualMode : Bool;   // Manual mode request.
+      xOffload { ExternalVisible := 'False'} : Bool;   // Set if this is offloading conveyor.
+      comms_from_prev_conv { ExternalVisible := 'False'} : Int;   // Communication input from previous conveyor in line.
+      comms_from_next_conv { ExternalVisible := 'False'} : Int;   // Communication input from next conveyor in line.
+   END_VAR
+
+   VAR_OUTPUT 
+      rollersFwd { ExternalVisible := 'False'} : Bool;   // True-> Conveyor belt on. Product moving forward.
+      statusLed { ExternalVisible := 'False'} : Bool;   // Light Indication to user.
+      comms_to_prev_conv { ExternalVisible := 'False'} : Int;   // Communication output to previous conveyor in line.
+      comms_to_next_conv { ExternalVisible := 'False'} : Int;   // Communication output to next conveyor in line.
+      alarms_out : Word;
+      alarms { ExternalAccessible := 'False'; ExternalVisible := 'False'; ExternalWritable := 'False'} AT alarms_out : Array[0..15] of Bool;
+   END_VAR
+
+   VAR 
+      state : Int;   // Conveyor state. 0->Startup; 1->ReadyToReceive; 2->Receiving; 3->ReadyToSend; 4->Sending; 5-> Error;
+      state_prev { ExternalVisible := 'False'} : Int;   // Previous conveyor state.
+      t_off {OriginalPartName := 'TOF'; LibVersion := '1.0'; ExternalVisible := 'False'} : TOF;
+      t_on {OriginalPartName := 'TON'; LibVersion := '1.0'; ExternalVisible := 'False'} : TON;
+      m_rollersFwd : Bool;   // Manual rollers motor forward request.
+   END_VAR
+
+   VAR CONSTANT 
+      s_startup : Int := 0;
+      s_ready_to_receive : Int := 1;
+      s_receiving : Int := 2;
+      s_ready_to_send : Int := 3;
+      s_sending : Int := 4;
+      s_reset : Int := 5;
+      s_manual : Int := 10;
+      m_silent : Int := 0;   // Inter-conveyor message (To both) : No message
+      m_req_send : Int := 100;   // Inter-conveyor message (To next) : Request to send product
+      m_perm_send : Int := 101;   // Inter-conveyor message (To prev) : Permission to send product
+      m_sending : Int := 102;   // Inter-conveyor message (To next) : Currently  sending product
+      c_conveyor_timeout : Time := T#25S;   // Time to wait for product to arrive or leave the conveyor
+   END_VAR
+
+
+BEGIN
+	// Simple, single direction conveyor.
+	// Push user button to send product to next conveyor in line.
+	
+	// Handle EStop and VSD error and reset conveyor.
+	IF (#eStop OR NOT #vsdReady) AND #state <> #s_reset THEN
+	    #state := #s_reset;
+	END_IF;
+	
+	// Conveyor state machine.
+	CASE #state OF
+	    0:  // Startup
+	        IF #state_prev <> #state THEN
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        IF #prdSens THEN
+	            #state := #s_ready_to_send;
+	        ELSE
+	            #state := #s_ready_to_receive;
+	        END_IF;
+	        ;
+	    1:  // Ready to Receive
+	        IF #state_prev <> #state THEN
+	            #t_off(IN := false,
+	                   PT := t#1s);
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        IF #prdSens THEN
+	            #comms_to_prev_conv := #m_silent;
+	            #state := #s_ready_to_send;
+	        ELSIF #xManualMode THEN
+	            #state := #s_manual;
+	        ELSE
+	            #t_off(IN := #comms_from_prev_conv = #m_req_send,
+	                   PT := t#1s);
+	            
+	            IF #t_off.Q THEN
+	                #comms_to_prev_conv := #m_perm_send;
+	                IF #comms_from_prev_conv = #m_sending THEN
+	                    #state := #s_receiving;
+	                END_IF;
+	            ELSE
+	                #comms_to_prev_conv := #m_silent;
+	            END_IF;
+	        END_IF;
+	        ;
+	    2:  // Receiving
+	        IF #state_prev <> #state THEN
+	            #t_on(IN := false,
+	                  PT := #c_conveyor_timeout);
+	            #rollersFwd := true;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #t_on(IN := true,
+	              PT := #c_conveyor_timeout);
+	        
+	        IF #prdSens THEN
+	            #state := #s_ready_to_send;
+	        ELSE
+	            IF #t_on.Q THEN
+	                // Timeout error - Product did not arrive in time.
+	                #alarms[0] := true;
+	                #state := #s_reset;
+	            END_IF;
+	        END_IF;
+	        
+	        IF #state_prev <> #state THEN
+	            #comms_to_prev_conv := #m_silent;
+	            #rollersFwd := false;
+	        END_IF;
+	        ;
+	    3:  // Ready to Send
+	        IF #state_prev <> #state THEN
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        IF NOT #prdSens THEN
+	            // Product mysteriously dissapeared.
+	            #comms_to_next_conv := #m_silent;
+	            #alarms[2] := NOT #xOffload;
+	            #state := #s_reset;
+	        ELSIF #xManualMode THEN
+	            #state := #s_manual;
+	        ELSE
+	            #t_off(IN := #usrBtn,
+	                   PT := t#1s);
+	            
+	            IF #t_off.Q THEN
+	                #comms_to_next_conv := #m_req_send;
+	                IF #comms_from_next_conv = #m_perm_send THEN
+	                    #state := #s_sending;
+	                END_IF;
+	            ELSE
+	                #comms_to_next_conv := #m_silent;
+	            END_IF;
+	        END_IF;
+	        ;
+	    4:  // Sending
+	        IF #state_prev <> #state THEN
+	            #t_on(IN := false,
+	                  PT := #c_conveyor_timeout);
+	            #rollersFwd := true;
+	            #comms_to_next_conv := #m_sending;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #t_on(IN := true,
+	              PT := #c_conveyor_timeout);
+	        
+	        IF NOT #prdSens AND #comms_from_next_conv <> #m_perm_send THEN
+	            #state := #s_ready_to_receive;
+	        ELSE
+	            IF #t_on.Q THEN
+	                // Timeout error - Product did not leave in time.
+	                #alarms[1] := true;
+	                #state := #s_reset;
+	            END_IF;
+	        END_IF;
+	        
+	        IF #state_prev <> #state THEN
+	            #rollersFwd := false;
+	            #comms_to_next_conv := #m_silent;
+	        END_IF;
+	        ;
+	    5:  // Reset
+	        IF #state_prev <> #state THEN
+	            #rollersFwd := false;
+	            #m_rollersFwd := false;
+	            #statusLed := false;
+	            #comms_to_next_conv := 0;
+	            #comms_to_prev_conv := 0;
+	            #t_on(IN := false,
+	                  PT := t#2s);
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #t_on(IN := true,
+	              PT := t#2s);
+	        
+	        IF #t_on.Q THEN
+	            #alarms_out := 0;
+	        END_IF;
+	        
+	        #alarms[8] := NOT #vsdReady AND NOT #eStop;
+	        
+	        IF NOT #eStop AND #vsdReady AND #t_on.Q THEN
+	            #alarms_out := 0;
+	            #state := #s_startup;
+	        END_IF;
+	        ;
+	    10:  // Manual Mode
+	        IF #state_prev <> #state THEN
+	            #rollersFwd := false;
+	            #statusLed := false;
+	            #comms_to_next_conv := 0;
+	            #comms_to_prev_conv := 0;
+	            #alarms_out := 0;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #rollersFwd := #m_rollersFwd;
+	        
+	        IF NOT #xManualMode THEN
+	            #state := #s_reset;
+	        END_IF;
+	        
+	        IF #state_prev <> #state THEN
+	            #rollersFwd := false;
+	            #m_rollersFwd := false;
+	        END_IF;
+	        ;
+	END_CASE;
+	
+END_FUNCTION_BLOCK
+

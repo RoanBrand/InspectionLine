@@ -1,0 +1,412 @@
+﻿FUNCTION_BLOCK "rollover"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+   VAR_INPUT 
+      usrBtn_Prd { ExternalVisible := 'False'} : Bool;   // User Button. Press (True) to initiate product send.
+      usrBtn_DHS { ExternalVisible := 'False'} : Bool;   // Dual-hand start button input. True to rotate rollover cage.
+      prdSens { ExternalVisible := 'False'} : Bool;   // Product Sensor. True-> Product present.
+      prox_bot_Pos { ExternalVisible := 'False'} : Bool;   // Proximity Sensor. True-> Rollover cage in bot position.
+      prox_bot_Slow { ExternalVisible := 'False'} : Bool;   // Proximity Sensor. True-> Rollover cage near bottom position. Slow down.
+      prox_top_Pos { ExternalVisible := 'False'} : Bool;   // Proximity Sensor. True-> Rollover cage in top position.
+      prox_top_Slow { ExternalVisible := 'False'} : Bool;   // Proximity Sensor. True-> Rollover cage near top position. Slow down.
+      eStop { ExternalVisible := 'False'} : Bool;   // Emergency stop button.
+      vsdReady_bot { ExternalVisible := 'False'} : Bool;   // Bottom rollers VSD Online and Ready. False -> In error state.
+      vsdReady_top { ExternalVisible := 'False'} : Bool;   // Top rollers VSD Online and Ready. False -> In error state.
+      vsdReady_RO { ExternalVisible := 'False'} : Bool;   // Rollover Cage VSD Online and Ready. False -> In error state.
+      xManualMode : Bool;   // Manual mode request.
+      comms_from_prev_conv { ExternalVisible := 'False'} : Int;   // Communication input from previous conveyor in line.
+      comms_from_next_conv { ExternalVisible := 'False'} : Int;   // Communication input from next conveyor in line.
+      xReceiveTop { ExternalVisible := 'False'} : Bool;   // Option: True-> Receive product on top rollers and send on bottom. False-> Vice versa. (default)
+      xAutoMode { ExternalVisible := 'False'} : Bool;   // Option: True-> Rollover cage will automatically turn product when received and be ready for send.
+   END_VAR
+
+   VAR_OUTPUT 
+      rollers_bot_Fwd { ExternalVisible := 'False'} : Bool;   // True-> Bottom Conveyor belt on. Product moving forward.
+      rollers_top_Fwd { ExternalVisible := 'False'} : Bool;   // True-> Top Conveyor belt on. Product moving forward.
+      rollover_Fwd { ExternalVisible := 'False'} : Bool;   // True-> Rollover cage turning to top position.
+      rollover_Rev { ExternalVisible := 'False'} : Bool;   // True-> Rollover cage turning to bottom position.
+      rollover_Fast { ExternalVisible := 'False'} : Bool;   // True-> Rollover cage turning faster. False-> Slow.
+      statusLed { ExternalVisible := 'False'} : Bool;   // Light Indication to user.
+      comms_to_prev_conv { ExternalVisible := 'False'} : Int;   // Communication output to previous conveyor in line.
+      comms_to_next_conv { ExternalVisible := 'False'} : Int;   // Communication output to next conveyor in line.
+      alarms_out : Word;
+      alarms { ExternalAccessible := 'False'; ExternalVisible := 'False'; ExternalWritable := 'False'} AT alarms_out : Array[0..15] of Bool;
+   END_VAR
+
+   VAR 
+      state : Int;   // Conveyor state. 0->Startup; 1->ReadyToReceive; 2->Receiving; 3->ReadyToSend; 4->Sending; 5-> Error;
+      state_prev { ExternalVisible := 'False'} : Int;   // Previous conveyor state.
+      t_off {OriginalPartName := 'TOF'; LibVersion := '1.0'; ExternalVisible := 'False'} : TOF;
+      t_on {OriginalPartName := 'TON'; LibVersion := '1.0'; ExternalVisible := 'False'} : TON;
+      m_rollers_bot : Bool;   // Manual rollers motor forward request.
+      m_rollers_top : Bool;
+      m_turn_bot : Bool;
+      m_turn_top : Bool;
+   END_VAR
+
+   VAR_TEMP 
+      m_turning_bot : Bool;
+      m_turning_top : Bool;
+   END_VAR
+
+   VAR CONSTANT 
+      s_startup : Int := 0;
+      s_ready_to_receive : Int := 1;
+      s_receiving : Int := 2;
+      s_ready_to_send : Int := 3;
+      s_sending : Int := 4;
+      s_reset : Int := 5;
+      s_turn_bot : Int := 6;
+      s_turn_top : Int := 7;
+      s_manual : Int := 10;
+      m_silent : Int := 0;   // Inter-conveyor message (To both) : No message
+      m_req_send : Int := 100;   // Inter-conveyor message (To next) : Request to send product
+      m_perm_send : Int := 101;   // Inter-conveyor message (To prev) : Permission to send product
+      m_sending : Int := 102;   // Inter-conveyor message (To next) : Currently  sending product
+      c_conveyor_timeout : Time := T#25S;   // Time to wait for product to arrive or leave the conveyor
+   END_VAR
+
+
+BEGIN
+	// Rollover cage conveyor.
+	// Receives product on bottom or top position and sends on the other position.
+	// Push Dual-handed start buttons to rotate product.
+	// Push user button to send product to next conveyor in line.
+	// Automatic mode will turn the product by itself. Implement safety measures.
+	
+	// Handle EStop and VSD error and reset conveyor.
+	IF (#eStop OR NOT (#vsdReady_bot AND #vsdReady_top AND #vsdReady_RO))
+	    AND #state <> #s_reset THEN
+	    #state := #s_reset;
+	END_IF;
+	
+	// Check proximity sensors
+	IF (#prox_bot_Pos OR #prox_bot_Slow) AND (#prox_top_Pos OR #prox_top_Slow)
+	    AND #state <> #s_reset THEN
+	    #alarms[11] := true;
+	    #state := #s_reset;
+	END_IF;
+	
+	// Rollover state machine.
+	CASE #state OF
+	    0:  // Startup
+	        IF #state_prev <> #state THEN
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        IF #xReceiveTop THEN
+	            IF #prox_bot_Pos THEN
+	                IF #prdSens THEN
+	                    #state := #s_ready_to_send;
+	                ELSE
+	                    #state := #s_turn_top;
+	                END_IF;
+	            ELSIF #prox_top_Pos THEN
+	                IF #prdSens THEN
+	                    #state := #s_turn_bot;
+	                ELSE
+	                    #state := #s_ready_to_receive;
+	                END_IF;
+	            ELSE
+	                #state := #s_turn_top;
+	            END_IF;
+	        ELSE
+	            IF #prox_bot_Pos THEN
+	                IF #prdSens THEN
+	                    #state := #s_turn_top;
+	                ELSE
+	                    #state := #s_ready_to_receive;
+	                END_IF;
+	            ELSIF #prox_top_Pos THEN
+	                IF #prdSens THEN
+	                    #state := #s_ready_to_send;
+	                ELSE
+	                    #state := #s_turn_bot;
+	                END_IF;
+	            ELSE
+	                #state := #s_turn_bot;
+	            END_IF;
+	        END_IF;
+	        ;
+	    1:  // Ready to Receive
+	        IF #state_prev <> #state THEN
+	            #t_off(IN := false,
+	                   PT := t#1s);
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        IF #xManualMode THEN
+	            #state := #s_manual;
+	        ELSE
+	            #t_off(IN := #comms_from_prev_conv = #m_req_send,
+	                   PT := t#1s);
+	            
+	            IF #t_off.Q THEN
+	                #comms_to_prev_conv := #m_perm_send;
+	                IF #comms_from_prev_conv = #m_sending THEN
+	                    #state := #s_receiving;
+	                END_IF;
+	            ELSE
+	                #comms_to_prev_conv := #m_silent;
+	            END_IF;
+	        END_IF;
+	        ;
+	    2:  // Receiving
+	        IF #state_prev <> #state THEN
+	            #t_on(IN := false,
+	                  PT := #c_conveyor_timeout);
+	            IF #xReceiveTop THEN
+	                #rollers_top_Fwd := true;
+	            ELSE
+	                #rollers_bot_Fwd := true;
+	            END_IF;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #t_on(IN := true,
+	              PT := #c_conveyor_timeout);
+	        
+	        IF #prdSens THEN
+	            IF #xReceiveTop THEN
+	                #state := #s_turn_bot;
+	            ELSE
+	                #state := #s_turn_top;
+	            END_IF;
+	        ELSE
+	            IF #t_on.Q THEN
+	                // Timeout error - Product did not arrive in time.
+	                #alarms[0] := true;
+	                #state := #s_reset;
+	            END_IF;
+	        END_IF;
+	        
+	        IF #state_prev <> #state THEN
+	            #comms_to_prev_conv := #m_silent;
+	            #rollers_bot_Fwd := false;
+	            #rollers_top_Fwd := false;
+	        END_IF;
+	        ;
+	    3:  // Ready to Send
+	        IF #state_prev <> #state THEN
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        IF NOT #prdSens THEN
+	            // Product mysteriously dissapeared.
+	            #comms_to_next_conv := #m_silent;
+	            #alarms[2] := true;
+	            #state := #s_reset;
+	        ELSIF #xManualMode THEN
+	            #state := #s_manual;
+	        ELSE
+	            #t_off(IN := #usrBtn_Prd,
+	                   PT := t#1s);
+	            
+	            IF #t_off.Q THEN
+	                #comms_to_next_conv := #m_req_send;
+	                IF #comms_from_next_conv = #m_perm_send THEN
+	                    #state := #s_sending;
+	                END_IF;
+	            ELSE
+	                #comms_to_next_conv := #m_silent;
+	            END_IF;
+	        END_IF;
+	        ;
+	    4:  // Sending
+	        IF #state_prev <> #state THEN
+	            #t_on(IN := false,
+	                  PT := #c_conveyor_timeout);
+	            IF #xReceiveTop THEN
+	                #rollers_bot_Fwd := true;
+	            ELSE
+	                #rollers_top_Fwd := true;
+	            END_IF;
+	            #comms_to_next_conv := #m_sending;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #t_on(IN := true,
+	              PT := #c_conveyor_timeout);
+	        
+	        IF NOT #prdSens AND #comms_from_next_conv <> #m_perm_send THEN
+	            IF #prox_top_Pos THEN
+	                #state := #s_turn_bot;
+	            ELSE
+	                #state := #s_turn_top;
+	            END_IF;
+	        ELSE
+	            IF #t_on.Q THEN
+	                // Timeout error - Product did not leave in time.
+	                #alarms[1] := true;
+	                #state := #s_reset;
+	            END_IF;
+	        END_IF;
+	        
+	        IF #state_prev <> #state THEN
+	            #rollers_bot_Fwd := false;
+	            #rollers_top_Fwd := false;
+	            #comms_to_next_conv := #m_silent;
+	        END_IF;
+	        ;
+	    5:  // Reset
+	        IF #state_prev <> #state THEN
+	            #rollers_bot_Fwd := false;
+	            #rollers_top_Fwd := false;
+	            #rollover_Fwd := false;
+	            #rollover_Rev := false;
+	            #m_rollers_bot := false;
+	            #m_rollers_top := false;
+	            #m_turning_bot := false;
+	            #m_turning_top := false;
+	            #statusLed := false;
+	            #comms_to_next_conv := 0;
+	            #comms_to_prev_conv := 0;
+	            #t_on(IN := false,
+	                  PT := t#2s);
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #t_on(IN := true,
+	              PT := t#2s);
+	        
+	        IF #t_on.Q THEN
+	            #alarms_out := 0;
+	        END_IF;
+	        
+	        #alarms[8] := NOT #vsdReady_bot AND NOT #eStop;
+	        #alarms[9] := NOT #vsdReady_top AND NOT #eStop;
+	        #alarms[10] := NOT #vsdReady_RO AND NOT #eStop;
+	        #alarms[11] := (#prox_bot_Pos OR #prox_bot_Slow) AND (#prox_top_Pos OR #prox_top_Slow);
+	        
+	        IF #t_on.Q AND NOT #eStop AND #vsdReady_bot AND #vsdReady_top AND #vsdReady_RO
+	            AND NOT ((#prox_bot_Pos OR #prox_bot_Slow) AND (#prox_top_Pos OR #prox_top_Slow)) THEN
+	            #alarms_out := 0;
+	            #state := #s_startup;
+	        END_IF;
+	        ;
+	    6:  // Turn to Bottom position
+	        IF #state_prev <> #state THEN
+	            #rollover_Fast := true;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #rollover_Rev := #usrBtn_DHS OR #xAutoMode;
+	        IF #prox_bot_Slow THEN
+	            #rollover_Fast := false;
+	        END_IF;
+	        
+	        IF #xManualMode THEN
+	            #state := #s_manual;
+	        ELSIF #prox_bot_Pos THEN
+	            IF #prdSens THEN
+	                IF #xReceiveTop THEN
+	                    #state := #s_ready_to_send;
+	                ELSE
+	                    #state := #s_turn_top;
+	                END_IF;
+	            ELSE
+	                IF #xReceiveTop THEN
+	                    #state := #s_turn_top;
+	                ELSE
+	                    #state := #s_ready_to_receive;
+	                END_IF;
+	            END_IF;
+	        END_IF;
+	        
+	        IF #state_prev <> #state THEN
+	            #rollover_Rev := false;
+	            #rollover_Fast := false;
+	        END_IF;
+	        ;
+	    7:  // Turn to Top position
+	        IF #state_prev <> #state THEN
+	            #rollover_Fast := true;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #rollover_Fwd := #usrBtn_DHS OR #xAutoMode;
+	        IF #prox_top_Slow THEN
+	            #rollover_Fast := false;
+	        END_IF;
+	        
+	        IF #xManualMode THEN
+	            #state := #s_manual;
+	        ELSIF #prox_top_Pos THEN
+	            IF #prdSens THEN
+	                IF #xReceiveTop THEN
+	                    #state := #s_turn_bot;
+	                ELSE
+	                    #state := #s_ready_to_send;
+	                END_IF;
+	            ELSE
+	                IF #xReceiveTop THEN
+	                    #state := #s_ready_to_receive;
+	                ELSE
+	                    #state := #s_turn_bot;
+	                END_IF;
+	            END_IF;
+	        END_IF;
+	        
+	        IF #state_prev <> #state THEN
+	            #rollover_Fwd := false;
+	            #rollover_Fast := false;
+	        END_IF;
+	        ;
+	    10:  // Manual Mode
+	        IF #state_prev <> #state THEN
+	            #rollers_bot_Fwd := false;
+	            #rollers_top_Fwd := false;
+	            #rollover_Fwd := false;
+	            #rollover_Rev := false;
+	            #statusLed := false;
+	            #comms_to_next_conv := 0;
+	            #comms_to_prev_conv := 0;
+	            #alarms_out := 0;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #rollers_bot_Fwd := #m_rollers_bot;
+	        #rollers_top_Fwd := #m_rollers_top;
+	        
+	        IF #m_turn_bot THEN
+	            #rollover_Fast := true;
+	            #rollover_Rev := true;
+	            #m_turning_bot := true;
+	        END_IF;
+	        IF #m_turn_top THEN
+	            #rollover_Fast := true;
+	            #rollover_Fwd := true;
+	            #m_turning_top := true;
+	        END_IF;
+	        
+	        IF (#m_turning_bot AND #prox_bot_Slow)
+	            OR (#m_turning_top AND #prox_top_Slow) THEN
+	            #rollover_Fast := false;
+	        END_IF;
+	        
+	        IF #m_turning_bot AND #prox_bot_Pos THEN
+	            #rollover_Rev := false;
+	        END_IF;
+	        IF #m_turning_top AND #prox_top_Pos THEN
+	            #rollover_Fwd := false;
+	        END_IF;
+	        
+	        IF NOT #xManualMode THEN
+	            #state := #s_reset;
+	        END_IF;
+	        
+	        IF #state_prev <> #state THEN
+	            #rollers_bot_Fwd := false;
+	            #rollers_top_Fwd := false;
+	            #rollover_Fwd := false;
+	            #rollover_Rev := false;
+	            #m_rollers_bot := false;
+	            #m_rollers_top := false;
+	            #m_turning_bot := false;
+	            #m_turning_top := false;
+	        END_IF;
+	        ;
+	END_CASE;
+	
+END_FUNCTION_BLOCK
+

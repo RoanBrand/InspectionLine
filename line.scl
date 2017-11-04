@@ -1,0 +1,227 @@
+﻿FUNCTION_BLOCK "line"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+   VAR_INPUT 
+      hmi_LineReset : Bool;   // Reset Line after emergency stop from HMI.
+   END_VAR
+
+   VAR_OUTPUT 
+      alarms_out : Word;
+      alarms { ExternalAccessible := 'False'; ExternalVisible := 'False'; ExternalWritable := 'False'} AT alarms_out : Array[0..15] of Bool;
+   END_VAR
+
+   VAR 
+      conv1 : "conveyor";
+      conv2 : "conveyor";
+      conv3 : "blowoff";
+      conv4 : "conveyor";
+      conv5 : "conveyor";
+      conv6 : "rollover";
+      conv7 : "tilter";
+      conv8 : "rollover";
+      conv9 : "conveyor";
+      conv10 : "conveyor";
+      T_LineReset {OriginalPartName := 'TOF'; LibVersion := '1.0'} : TOF;
+   END_VAR
+
+
+BEGIN
+	(* Emergency conditions *)
+	
+	#alarms[0] := NOT "iLineReady";
+	#alarms[1] := NOT "iConvGatesClosed";
+	#alarms[2] := NOT "iConv3_SafeGate_Closed";
+	
+	#alarms[4] := "iConv1_Estop";
+	#alarms[5] := "iConv2_Estop";
+	#alarms[6] := "iConv3_Estop";
+	#alarms[7] := "iConv4_Estop";
+	#alarms[8] := "iConv5_Estop";
+	#alarms[9] := "iConv6_Estop";
+	#alarms[10] := "iConv7_Estop";
+	#alarms[11] := "iConv8_Estop";
+	#alarms[12] := "iConv9_Estop";
+	#alarms[13] := "iConv10_Estop";
+	
+	
+	#T_LineReset(IN := #hmi_LineReset,
+	             PT := t#1s,
+	             Q => "oLineReset");
+	
+	
+	(* Conveyor line control *)
+	
+	// On-load conveyor.
+	#conv1(usrBtn := "iConv1_usrBtn",
+	       prdSens := "iConv1_prdSens",
+	       eStop := NOT "iLineReady",
+	       vsdReady := "iConv1_vsdReady",
+	       // comms_from_prev_conv := 0,
+	       comms_from_next_conv := #conv2.comms_to_prev_conv,
+	       rollersFwd => "oConv1_M_Fwd",
+	       statusLed => "oConv1_Led"
+	);
+	
+	#conv2(usrBtn := "iConv2_usrBtn",
+	       prdSens := "iConv2_prdSens",
+	       eStop := NOT "iLineReady",
+	       vsdReady := "iConv2_vsdReady",
+	       comms_from_prev_conv := #conv1.comms_to_next_conv,
+	       comms_from_next_conv := #conv3.comms_to_prev_conv,
+	       rollersFwd => "oConv2_M_Fwd",
+	       statusLed => "oConv2_Led"
+	);
+	
+	// Blow-off station. Uses conv4 user button to send product.
+	(*
+	#conv3(usrBtn := #conv3.state = 3 AND #conv4.state = 1 AND "iConv4_usrBtn",
+	       prdSens := "iConv3_prdSens",
+	       eStop := NOT "iLineReady",
+	       vsdReady := "iConv3_vsdReady",
+	       comms_from_prev_conv := #conv2.comms_to_next_conv,
+	       comms_from_next_conv := #conv4.comms_to_prev_conv,
+	       rollersFwd => "oConv3_M_Fwd",
+	       statusLed => "oConv3_Led"
+	);*)
+	
+	#conv3(usrBtn := #conv3.state = 3 AND #conv4.state = 1 AND "iConv4_usrBtn",
+	       prdSens := "iConv3_prdSens",
+	       eStop := NOT "iLineReady",
+	       vsdReady := "iConv3_vsdReady",
+	       comms_from_prev_conv := #conv2.comms_to_next_conv,
+	       comms_from_next_conv := #conv4.comms_to_prev_conv,
+	       
+	       pis_large_hor_s := "iConv3_pis_large_out",
+	       pis_large_ver_s := "iConv3_pis_large_in",
+	       clmp_edge_rel_s := "iConv3_clmp_edge_dwn",
+	       clmp_edge_up_s := "iConv3_clmp_edge_up",
+	       pis_lock_unlocked_s := "iConv3_pis_lock_in",
+	       pis_lock_locked_s := "iConv3_pis_lock_out",
+	       clmp_top_down_s := "iConv3_pis1_clmp1" AND "iConv3_pis2_clmp1",
+	       clmp_top_released_s := "iConv3_pis1_clmp2" AND "iConv3_pis2_clmp2",
+	       
+	       rollersFwd => "oConv3_M_Fwd",
+	       //rollersRev =>
+	       pis_large_go_up => "oConv3_pis_large_out",
+	       pis_large_go_down => "oConv3_pis_large_in",
+	       pis_lock_unlock => "oConv3_pis_lock"
+	);
+	
+	
+	"oConv3_edge_clmp" := NOT #conv3.clmp_edge_clamp;
+	"oConv3_pis_clmp_dwn" := NOT #conv3.clmp_top_clamp;
+	"oConv3_v1" := #conv3.blower_on1;
+	"oConv3_v2" := #conv3.blower_on1;
+	"oConv3_v3" := #conv3.blower_on1;
+	"oConv3_v4" := #conv3.blower_on2;
+	"oConv3_v5" := #conv3.blower_on2;
+	"oConv3_v6" := #conv3.blower_on2;
+	
+	#conv4(usrBtn := "iConv4_usrBtn",
+	       prdSens := "iConv4_prdSens",
+	       eStop := NOT "iLineReady",
+	       vsdReady := "iConv4_vsdReady",
+	       comms_from_prev_conv := #conv3.comms_to_next_conv,
+	       comms_from_next_conv := #conv5.comms_to_prev_conv,
+	       rollersFwd => "oConv4_M_Fwd",
+	       statusLed => "oConv4_Led"
+	);
+	
+	#conv5(usrBtn := "iConv5_usrBtn",
+	       prdSens := "iConv5_prdSens",
+	       eStop := NOT "iLineReady",
+	       vsdReady := "iConv5_vsdReady",
+	       comms_from_prev_conv := #conv4.comms_to_next_conv,
+	       comms_from_next_conv := #conv6.comms_to_prev_conv,
+	       rollersFwd => "oConv5_M_Fwd",
+	       statusLed => "oConv5_Led"
+	);
+	
+	// First Rollover. Uses conv7 user button to send product.
+	#conv6(usrBtn_Prd := #conv6.state = 3 AND #conv7.state = 1 AND "iConv7_usrBtn",
+	       //usrBtn_DHS := ,
+	       prdSens := "iConv6_prdSens",
+	       prox_bot_Pos := "iConv6_prox_bot_Home",
+	       prox_bot_Slow := "iConv6_prox_bot_Slow",
+	       prox_top_Pos := "iConv6_prox_top_Home",
+	       prox_top_Slow := "iConv6_prox_top_Slow",
+	       eStop := NOT "iLineReady",
+	       vsdReady_bot := "iConv6_bot_vsdReady",
+	       vsdReady_top := "iConv6_top_vsdReady",
+	       vsdReady_RO := "iConv6_RO_vsdReady",
+	       comms_from_prev_conv := #conv5.comms_to_next_conv,
+	       comms_from_next_conv := #conv7.comms_to_prev_conv,
+	       //xReceiveTop := false,
+	       xAutoMode := true,
+	       rollers_bot_Fwd => "oConv6_M_bot_Fwd",
+	       rollers_top_Fwd => "oConv6_M_top_Fwd",
+	       rollover_Fwd => "oConv6_M_RO_Fwd",
+	       rollover_Rev => "oConv6_M_RO_Rev",
+	       rollover_Fast => "oConv6_M_RO_Fast",
+	       statusLed => "oConv6_Led"
+	);
+	
+	// Tilting station
+	#conv7(usrBtn_Prd := "iConv7_usrBtn",
+	       usrBtn_DHS := "iConv7_DHS",
+	       usrBtn_tilt_dir := "iConv7_RO_Dir",
+	       prdSens := "iConv7_prdSens",
+	       prox_Home_pos := "iConv7_prox_Home",
+	       eStop := NOT "iLineReady",
+	       vsdReady_rollers := "iConv7_vsdReady",
+	       vsdReady_Tilt := "iConv7_RO_vsdReady",
+	       comms_from_prev_conv := #conv6.comms_to_next_conv,
+	       comms_from_next_conv := #conv8.comms_to_prev_conv,
+	       rollers_Fwd => "oConv7_M_Fwd",
+	       tilter_Fwd => "oConv7_M_RO_Fwd",
+	       tilter_Rev => "oConv7_M_RO_Rev",
+	       statusLed => "oConv7_Led"
+	);
+	
+	// Second Rollover. Uses conv9 user button to send product.
+	#conv8(usrBtn_Prd := #conv8.state = 3 AND #conv9.state = 1 AND "iConv9_usrBtn",
+	       //usrBtn_DHS := ,
+	       prdSens := "iConv8_prdSens",
+	       prox_bot_Pos := "iConv8_prox_bot_Home",
+	       prox_bot_Slow := "iConv8_prox_bot_Slow",
+	       prox_top_Pos := "iConv8_prox_top_Home",
+	       prox_top_Slow := "iConv8_prox_top_Slow",
+	       eStop := NOT "iLineReady",
+	       vsdReady_bot := "iConv8_bot_vsdReady",
+	       vsdReady_top := "iConv8_top_vsdReady",
+	       vsdReady_RO := "iConv8_RO_vsdReady",
+	       comms_from_prev_conv := #conv7.comms_to_next_conv,
+	       comms_from_next_conv := #conv9.comms_to_prev_conv,
+	       xReceiveTop := true,
+	       xAutoMode := true,
+	       rollers_bot_Fwd => "oConv8_M_bot_Fwd",
+	       rollers_top_Fwd => "oConv8_M_top_Fwd",
+	       rollover_Fwd => "oConv8_M_RO_Fwd",
+	       rollover_Rev => "oConv8_M_RO_Rev",
+	       rollover_Fast => "oConv8_M_RO_Fast",
+	       statusLed => "oConv8_Led"
+	);
+	
+	#conv9(usrBtn := "iConv9_usrBtn",
+	       prdSens := "iConv9_prdSens",
+	       eStop := NOT "iLineReady",
+	       vsdReady := "iConv9_vsdReady",
+	       comms_from_prev_conv := #conv8.comms_to_next_conv,
+	       comms_from_next_conv := #conv10.comms_to_prev_conv,
+	       rollersFwd => "oConv9_M_Fwd",
+	       statusLed => "oConv9_Led"
+	);
+	
+	#conv10(// usrBtn := ,
+	        prdSens := "iConv10_prdSens",
+	        eStop := NOT "iLineReady",
+	        vsdReady := "iConv10_vsdReady",
+	        comms_from_prev_conv := #conv9.comms_to_next_conv,
+	        // comms_from_next_conv := 0,
+	        xOffload := true,
+	        rollersFwd => "oConv10_M_Fwd",
+	        statusLed => "oConv10_Led"
+	);
+	
+END_FUNCTION_BLOCK
+

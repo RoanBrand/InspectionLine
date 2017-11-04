@@ -1,0 +1,106 @@
+﻿FUNCTION_BLOCK "simulation"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+   VAR 
+      s1 : Int;
+      s2 : Int;
+      conv1_send {OriginalPartName := 'TON'; LibVersion := '1.0'} : TON;
+      conv2_send {OriginalPartName := 'TON'; LibVersion := '1.0'} : TON;
+   END_VAR
+
+
+BEGIN
+	// Between conv 1 & 2.
+	
+	CASE #s1 OF
+	    0:  // Waiting to send product to next.
+	        IF "oConv1_M_Fwd" AND "oConv2_M_Fwd"
+	            AND "iConv1_prdSens" AND NOT "iConv2_prdSens"
+	        THEN
+	            #conv1_send(IN := false,
+	                        PT := t#4s);
+	            #s1 := 1;
+	        END_IF;
+	        ;
+	    1:  // Sending product to next.
+	        #conv1_send(IN := true,
+	                    PT := t#4s);
+	        
+	        IF #conv1_send.Q THEN
+	            "iConv1_prdSens" := false;
+	            #conv1_send(IN := false,
+	                        PT := t#2s);
+	            #s1 := 2;
+	        ELSE
+	            IF NOT "oConv1_M_Fwd"
+	                OR NOT "oConv2_M_Fwd"
+	            THEN
+	                #s1 := 0;
+	            END_IF;
+	        END_IF;
+	        ;
+	    2:  // Left previous, still to arrive at next.
+	        #conv1_send(IN := true,
+	                    PT := t#2s);
+	        
+	        IF #conv1_send.Q THEN
+	            "iConv2_prdSens" := true;
+	            #s1 := 0;
+	        ELSE
+	            IF NOT "oConv2_M_Fwd" THEN
+	                #s1 := 0;
+	            END_IF;
+	        END_IF;
+	        ;
+	    ELSE  // Statement section ELSE
+	        ;
+	END_CASE;
+	
+	// Between conv 2 & 3.
+	
+	CASE #s2 OF
+	    0:  // Waiting to send product to next.
+	        IF "oConv2_M_Fwd" AND "oConv3_M_Fwd"
+	            AND "iConv2_prdSens" AND NOT "iConv3_prdSens"
+	        THEN
+	            #conv2_send(IN := false,
+	                        PT := t#4s);
+	            #s2 := 1;
+	        END_IF;
+	        ;
+	    1:  // Sending product to next.
+	        #conv2_send(IN := true,
+	                    PT := t#4s);
+	        
+	        IF #conv2_send.Q THEN
+	            "iConv2_prdSens" := false;
+	            #conv2_send(IN := false,
+	                        PT := t#2s);
+	            #s2 := 2;
+	        ELSE
+	            IF NOT "oConv2_M_Fwd"
+	                OR NOT "oConv3_M_Fwd"
+	            THEN
+	                #s2 := 0;
+	            END_IF;
+	        END_IF;
+	        ;
+	    2:  // Left previous, still to arrive at next.
+	        #conv2_send(IN := true,
+	                    PT := t#2s);
+	        
+	        IF #conv2_send.Q THEN
+	            "iConv3_prdSens" := true;
+	            #s2 := 0;
+	        ELSE
+	            IF NOT "oConv3_M_Fwd" THEN
+	                #s2 := 0;
+	            END_IF;
+	        END_IF;
+	        ;
+	    ELSE  // Statement section ELSE
+	        ;
+	END_CASE;
+	
+END_FUNCTION_BLOCK
+

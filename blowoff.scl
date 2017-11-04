@@ -1,0 +1,431 @@
+﻿FUNCTION_BLOCK "blowoff"
+{ S7_Optimized_Access := 'FALSE' }
+VERSION : 0.1
+   VAR_INPUT 
+      usrBtn { ExternalVisible := 'False'} : Bool;   // User Button. Press (True) to initiate product send.
+      usrStartClean : Bool;   // User Button. Presss (True) to initiate product cleaning cycle.
+      prdSens { ExternalVisible := 'False'} : Bool;   // Product Sensor. True-> Product present.
+      eStop { ExternalVisible := 'False'} : Bool;   // Emergency stop button.
+      vsdReady { ExternalVisible := 'False'} : Bool;   // VSD Online and Ready. False-> Conveyor VSD off or in Error State.
+      comms_from_prev_conv { ExternalVisible := 'False'} : Int;   // Communication input from previous conveyor in line.
+      comms_from_next_conv { ExternalVisible := 'False'} : Int;   // Communication input from next conveyor in line.
+      pis_large_hor_s { ExternalVisible := 'False'} : Bool;
+      pis_large_ver_s { ExternalVisible := 'False'} : Bool;
+      clmp_edge_rel_s { ExternalVisible := 'False'} : Bool;
+      clmp_edge_up_s { ExternalVisible := 'False'} : Bool;
+      pis_lock_unlocked_s { ExternalVisible := 'False'} : Bool;
+      pis_lock_locked_s { ExternalVisible := 'False'} : Bool;
+      clmp_top_down_s { ExternalVisible := 'False'} : Bool;
+      clmp_top_released_s { ExternalVisible := 'False'} : Bool;
+      xManualMode : Bool;
+      xAutoClean : Bool := true;   // True-> Auto clean when received.
+   END_VAR
+
+   VAR_OUTPUT 
+      rollersFwd { ExternalVisible := 'False'} : Bool;   // True-> Conveyor belt on. Product moving forward.
+      rollersRev : Bool;
+      statusLed { ExternalVisible := 'False'} : Bool;   // Light Indication to user.
+      pis_large_go_up { ExternalVisible := 'False'} : Bool;
+      pis_large_go_down { ExternalVisible := 'False'} : Bool;
+      clmp_edge_clamp { ExternalVisible := 'False'} : Bool;
+      pis_lock_unlock { ExternalVisible := 'False'} : Bool;
+      clmp_top_clamp { ExternalVisible := 'False'} : Bool;
+      blower_turn { ExternalVisible := 'False'} : Bool;
+      blower_on1 { ExternalVisible := 'False'} : Bool;
+      blower_on2 { ExternalVisible := 'False'} : Bool;
+      blower_on3 { ExternalVisible := 'False'} : Bool;
+      blower_on4 { ExternalVisible := 'False'} : Bool;
+      blower_on5 { ExternalVisible := 'False'} : Bool;
+      blower_on6 { ExternalVisible := 'False'} : Bool;
+      comms_to_prev_conv { ExternalVisible := 'False'} : Int;   // Communication output to previous conveyor in line.
+      comms_to_next_conv { ExternalVisible := 'False'} : Int;   // Communication output to next conveyor in line.
+      alarms_out : Word;
+      alarms { ExternalAccessible := 'False'; ExternalVisible := 'False'; ExternalWritable := 'False'} AT alarms_out : Array[0..15] of Bool;
+   END_VAR
+
+   VAR 
+      state : Int;   // Conveyor state. 0->Startup; 1->ReadyToReceive; 2->Receiving; 3->ReadyToSend; 4->Sending; 5-> Error;
+      state_prev { ExternalVisible := 'False'} : Int;   // Previous conveyor state.
+      clean_cycle_state { ExternalVisible := 'False'} : Int;
+      t_off {OriginalPartName := 'TOF'; LibVersion := '1.0'; ExternalVisible := 'False'} : TOF;
+      t_on {OriginalPartName := 'TON'; LibVersion := '1.0'; ExternalVisible := 'False'} : TON;
+      m_rollersFwd : Bool;
+   END_VAR
+
+   VAR CONSTANT 
+      s_startup : Int := 0;
+      s_ready_to_receive : Int := 1;
+      s_receiving : Int := 2;
+      s_ready_to_send : Int := 3;
+      s_sending : Int := 4;
+      s_reset : Int := 5;
+      s_manual : Int := 10;
+      s_tilting : Int := 100;
+      m_silent : Int := 0;   // Inter-conveyor message (To both) : No message
+      m_req_send : Int := 100;   // Inter-conveyor message (To next) : Request to send product
+      m_perm_send : Int := 101;   // Inter-conveyor message (To prev) : Permission to send product
+      m_sending : Int := 102;   // Inter-conveyor message (To next) : Currently  sending product
+      c_conveyor_timeout : Time := T#25S;   // Time to wait for product to arrive or leave the conveyor
+   END_VAR
+
+
+BEGIN
+	// Blow-off product cleaning station.
+	// Push user button to send product to next conveyor in line.
+	
+	// Handle EStop and VSD error and reset conveyor.
+	IF (#eStop OR (NOT #vsdReady AND #state <> #s_tilting))
+	    AND #state <> #s_reset THEN
+	    #state := #s_reset;
+	END_IF;
+	
+	// Conveyor state machine.
+	CASE #state OF
+	    0:  // Startup
+	        IF #state_prev <> #state THEN
+	            #t_on(IN := false,
+	                  PT := t#30s);
+	            IF NOT #pis_large_hor_s THEN
+	                #pis_lock_unlock := true;
+	            END_IF;
+	            #pis_large_go_up := true;
+	            #pis_large_go_down := false;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #t_on(IN := true,
+	              PT := t#30s);
+	        
+	        IF #pis_large_hor_s THEN
+	            #pis_lock_unlock := false;
+	        END_IF;
+	        
+	        IF #pis_lock_locked_s AND #pis_large_hor_s THEN
+	            IF #prdSens THEN
+	                // cleaned?
+	                #state := #s_tilting;
+	            ELSE
+	                #state := #s_ready_to_receive;
+	            END_IF;
+	        END_IF;
+	        ;
+	    1:  // Ready to Receive
+	        IF #state_prev <> #state THEN
+	            #t_off(IN := false,
+	                   PT := t#1s);
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        IF #prdSens THEN
+	            #comms_to_prev_conv := #m_silent;
+	            #state := #s_ready_to_send;
+	        ELSE
+	            #t_off(IN := #comms_from_prev_conv = #m_req_send,
+	                   PT := t#1s);
+	            
+	            IF #t_off.Q THEN
+	                #comms_to_prev_conv := #m_perm_send;
+	                IF #comms_from_prev_conv = #m_sending THEN
+	                    #state := #s_receiving;
+	                END_IF;
+	            ELSE
+	                #comms_to_prev_conv := #m_silent;
+	            END_IF;
+	        END_IF;
+	        ;
+	    2:  // Receiving
+	        IF #state_prev <> #state THEN
+	            #t_on(IN := false,
+	                  PT := #c_conveyor_timeout);
+	            #rollersFwd := true;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #t_on(IN := true,
+	              PT := #c_conveyor_timeout);
+	        
+	        IF #prdSens THEN
+	            IF #xAutoClean THEN
+	                #state := #s_tilting;
+	            ELSE
+	                #state := #s_ready_to_send;
+	            END_IF;
+	        ELSE
+	            IF #t_on.Q THEN
+	                // Timeout error - Product did not arrive in time.
+	                #alarms[0] := true;
+	                #state := #s_reset;
+	            END_IF;
+	        END_IF;
+	        
+	        IF #state_prev <> #state THEN
+	            #comms_to_prev_conv := #m_silent;
+	            #rollersFwd := false;
+	        END_IF;
+	        ;
+	    3:  // Ready to Send
+	        IF #state_prev <> #state THEN
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        IF NOT #prdSens THEN
+	            // Product mysteriously dissapeared.
+	            #comms_to_next_conv := #m_silent;
+	            #alarms[2] := true;
+	            #state := #s_reset;
+	        ELSIF #usrStartClean THEN
+	            // Start cleaning cycle.
+	            #comms_to_next_conv := #m_silent;
+	            #state := #s_tilting;
+	        ELSE
+	            #t_off(IN := #usrBtn,
+	                   PT := t#1s);
+	            
+	            IF #t_off.Q THEN
+	                #comms_to_next_conv := #m_req_send;
+	                IF #comms_from_next_conv = #m_perm_send THEN
+	                    #state := #s_sending;
+	                END_IF;
+	            ELSE
+	                #comms_to_next_conv := #m_silent;
+	            END_IF;
+	        END_IF;
+	        ;
+	    4:  // Sending
+	        IF #state_prev <> #state THEN
+	            #t_on(IN := false,
+	                  PT := #c_conveyor_timeout);
+	            #rollersFwd := true;
+	            #comms_to_next_conv := #m_sending;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #t_on(IN := true,
+	              PT := #c_conveyor_timeout);
+	        
+	        IF NOT #prdSens AND #comms_from_next_conv <> #m_perm_send THEN
+	            #state := #s_ready_to_receive;
+	        ELSE
+	            IF #t_on.Q THEN
+	                // Timeout error - Product did not leave in time.
+	                #alarms[1] := true;
+	                #state := #s_reset;
+	            END_IF;
+	        END_IF;
+	        
+	        IF #state_prev <> #state THEN
+	            #rollersFwd := false;
+	            #comms_to_next_conv := #m_silent;
+	        END_IF;
+	        ;
+	    5:  // Reset
+	        IF #state_prev <> #state THEN
+	            #rollersFwd := false;
+	            #statusLed := false;
+	            #comms_to_next_conv := 0;
+	            #comms_to_prev_conv := 0;
+	            #t_on(IN := false,
+	                  PT := t#2s);
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        #t_on(IN := true,
+	              PT := t#2s);
+	        
+	        IF #t_on.Q THEN
+	            #alarms_out := 0;
+	        END_IF;
+	        
+	        #alarms[3] := NOT #vsdReady AND NOT #eStop;
+	        
+	        IF #t_on.Q AND NOT #eStop AND #vsdReady THEN
+	            #alarms_out := 0;
+	            #state := #s_startup;
+	        END_IF;
+	        ;
+	    100:  // Tilting
+	        IF #state_prev <> #state THEN
+	            #t_on(IN := false,
+	                  PT := t#1.8s);
+	            #clean_cycle_state := 0;
+	            #clmp_edge_clamp := true;
+	            #rollersRev := true;
+	            #state_prev := #state;
+	        END_IF;
+	        
+	        CASE #clean_cycle_state OF
+	            0: // Reversing product against back clamp.
+	                #t_on(IN := true,
+	                      PT := t#1.8s);
+	                IF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#2s);
+	                    #rollersRev := false;
+	                    IF #clmp_edge_up_s THEN
+	                        #clmp_top_clamp := true;
+	                        #clean_cycle_state := 1;
+	                    ELSE
+	                        #alarms[8] := true;
+	                        #clean_cycle_state := 15;
+	                    END_IF;
+	                END_IF;
+	                ;
+	            1:  // Check if product clamped and remove lock.
+	                #t_on(IN := true,
+	                      PT := t#2s);
+	                IF #clmp_top_down_s THEN
+	                    #t_on(IN := false,
+	                          PT := t#5s);
+	                    #pis_lock_unlock := true;
+	                    #clean_cycle_state := 2;
+	                ELSIF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#5s);
+	                    #alarms[9] := true;
+	                    #clean_cycle_state := 15;
+	                END_IF;
+	            2:  // Wait for lock then tilt product 90deg.
+	                #t_on(IN := true,
+	                      PT := t#5s);
+	                IF #pis_lock_unlocked_s THEN
+	                    #t_on(IN := false,
+	                          PT := t#20s);
+	                    #pis_large_go_up := false;
+	                    #pis_large_go_down := true;
+	                    #clean_cycle_state := 3;
+	                ELSIF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#20s);
+	                    #alarms[10] := true;
+	                    #clean_cycle_state := 15;
+	                END_IF;
+	            3:  // Wait for product to finish tilting down.
+	                #t_on(IN := true,
+	                      PT := t#20s);
+	                IF #pis_large_ver_s THEN
+	                    #t_on(IN := false,
+	                          PT := t#8s);
+	                    #blower_on1 := true;
+	                    #blower_turn := true;
+	                    #clean_cycle_state := 4;
+	                ELSIF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#8s);
+	                    #alarms[11] := true;
+	                    #clean_cycle_state := 15;
+	                END_IF;
+	            4:  // Clean product stage 1.
+	                #t_on(IN := true,
+	                      PT := t#8s);
+	                IF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#250ms);
+	                    #blower_on1 := false;
+	                    #clean_cycle_state := 5;
+	                END_IF;
+	            5:  // Switchover to stage 2.
+	                #t_on(IN := true,
+	                      PT := t#250ms);
+	                IF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#8s);
+	                    #blower_on2 := true;
+	                    #clean_cycle_state := 6;
+	                END_IF;
+	            6:  // Clean product stage 2.
+	                #t_on(IN := true,
+	                      PT := t#8s);
+	                IF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#30s);
+	                    #blower_on2 := false;
+	                    #blower_turn := false;
+	                    #pis_large_go_down := false;
+	                    #pis_large_go_up := true;
+	                    // bProduct_Cleaned := true;
+	                    #clean_cycle_state := 7;
+	                END_IF;
+	            7:  // Wait for product to finish tilting up.
+	                #t_on(IN := true,
+	                      PT := t#30s);
+	                IF #pis_large_hor_s THEN
+	                    #t_on(IN := false,
+	                          PT := t#2s);
+	                    #clean_cycle_state := 8;
+	                ELSIF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#2s);
+	                    #alarms[12] := true;
+	                    #clean_cycle_state := 15;
+	                END_IF;
+	            8:  // Wait for hole to align then set lock.
+	                #t_on(IN := true,
+	                      PT := t#2s);
+	                IF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#5s);
+	                    #pis_lock_unlock := false;
+	                    #clean_cycle_state := 9;
+	                END_IF;
+	            9:  // Wait for lock then release clamps.
+	                #t_on(IN := true,
+	                      PT := t#5s);
+	                IF #pis_lock_locked_s THEN
+	                    #t_on(IN := false,
+	                          PT := t#5s);
+	                    #clmp_top_clamp := false;
+	                    #clmp_edge_clamp := false;
+	                    #clean_cycle_state := 10;
+	                ELSIF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#5s);
+	                    #alarms[13] := true;
+	                    #clean_cycle_state := 15;
+	                END_IF;
+	            10: // Wait for product to be released.
+	                #t_on(IN := true,
+	                      PT := t#5s);
+	                IF #clmp_edge_rel_s AND #clmp_top_released_s THEN
+	                    #state := #s_ready_to_send;
+	                ELSIF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#5s);
+	                    #alarms[14] := true;
+	                    #clean_cycle_state := 15;
+	                END_IF;
+	            15: // Show alarm and cancel process.
+	                #t_on(IN := true,
+	                      PT := t#2s);
+	                IF NOT #pis_large_hor_s THEN
+	                    #pis_lock_unlock := true;
+	                END_IF;
+	                #pis_large_go_down := false;
+	                #pis_large_go_up := true;
+	                #blower_turn := false;
+	                #blower_on1 := false;
+	                #blower_on2 := false;
+	                IF #t_on.Q THEN
+	                    #t_on(IN := false,
+	                          PT := t#30s);
+	                    #alarms_out := 0;
+	                    #clean_cycle_state := 16;
+	                END_IF;
+	            16: // Wait for process to finish cancelling.
+	                #t_on(IN := true,
+	                      PT := t#30s);
+	                IF #pis_large_hor_s THEN
+	                    #pis_lock_unlock := false;
+	                    #clmp_top_clamp := false;
+	                    #clmp_edge_clamp := false;
+	                END_IF;
+	                #alarms[15] := #t_on.Q;
+	                IF #pis_lock_locked_s AND #clmp_edge_rel_s AND #clmp_top_released_s THEN
+	                    #alarms_out := 0;
+	                    #state := #s_ready_to_send;
+	                END_IF;
+	        END_CASE;
+	        ;
+	END_CASE;
+	
+END_FUNCTION_BLOCK
+
